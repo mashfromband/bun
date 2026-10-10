@@ -31,6 +31,8 @@ pub struct SSLConfig {
 
     pub key: CStrSlice,
     pub cert: CStrSlice,
+    /// `None`: not given, the default roots are trusted. `Some`: the only
+    /// trusted certificates, also when the list is empty (`ca: []`).
     pub ca: CStrSlice,
     pub crl: CStrSlice,
 
@@ -362,6 +364,9 @@ impl SSLConfig {
         macro_rules! hash_slice {
             ($f:ident) => {
                 if let Some(slice) = &self.$f {
+                    // A list with no entry is not an absent one (`ca: []` trusts nothing), and the
+                    // keep-alive pool compares this hash alone.
+                    hasher.update(&[1]);
                     for s in slice.iter() {
                         hasher.update(cstr_bytes(*s));
                         hasher.update(&[0]);

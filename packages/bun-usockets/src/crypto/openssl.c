@@ -830,22 +830,25 @@ end:
  * it. https://github.com/nodejs/node/blob/v26.3.0/src/crypto/crypto_context.cc#L1831 */
 static X509_STORE *us_ssl_ctx_get_own_cert_store(SSL_CTX *ctx) {
   X509_STORE *store = SSL_CTX_get_cert_store(ctx);
+  us_ex_idx_ensure();
+  /* A marked context owns its store and keeps it as it is, also when its `ca`
+   * put zero certificates in it (an empty list, or a key PEM, which Node
+   * ignores too): the default roots are neither added to that intentionally
+   * empty pin set nor built for it. */
+  if (store != NULL && SSL_CTX_get_ex_data(ctx, us_ctx_user_ca_ex_idx) != NULL) {
+    return store;
+  }
   /* us_get_shared_default_ca_store() up-refs before returning, so release
    * the reference taken just for this comparison. */
   X509_STORE *shared = us_get_shared_default_ca_store();
   int store_is_shared = store != NULL && store == shared;
   X509_STORE_free(shared);
-  us_ex_idx_ensure();
   int store_is_empty = 0;
   if (store != NULL && !store_is_shared) {
     const STACK_OF(X509_OBJECT) *objs = X509_STORE_get0_objects(store);
     store_is_empty = objs == NULL || sk_X509_OBJECT_num(objs) == 0;
   }
-  /* A user `ca` can legitimately add zero certificates (a key PEM is ignored,
-   * like Node), leaving an intentionally-empty pin set: only a context with
-   * no `ca` configured at all may be seeded with the default roots here. */
-  int user_ca = SSL_CTX_get_ex_data(ctx, us_ctx_user_ca_ex_idx) != NULL;
-  if (store == NULL || store_is_shared || (store_is_empty && !user_ca)) {
+  if (store == NULL || store_is_shared || store_is_empty) {
     X509_STORE *own = us_get_default_ca_store();
     if (own == NULL) {
       return NULL;
@@ -1361,12 +1364,13 @@ SSL_CTX *us_ssl_ctx_build_raw(struct us_bun_socket_context_options_t options,
       ssl_ctx_build_fail(ssl_context);
       return NULL;
     }
-  } else if (options.ca && options.ca_count > 0) {
+  } else if (options.ca) {
     us_ex_idx_ensure();
     SSL_CTX_set_ex_data(ssl_context, us_ctx_user_ca_ex_idx, (void *)1);
     /* As above: user CAs only, into the SSL_CTX's own initially-empty store —
      * otherwise a server doing mTLS with `ca: [internalCA]` would also accept
-     * any client certificate that chains to a public root. */
+     * any client certificate that chains to a public root. A `ca` list with
+     * no entries (node's `ca: []`) leaves the store empty: nothing is trusted. */
     X509_STORE *cert_store = SSL_CTX_get_cert_store(ssl_context);
     STACK_OF(CRYPTO_BUFFER) *ca_certs = sk_CRYPTO_BUFFER_new_null();
     for (unsigned int i = 0; ca_certs != NULL && i < options.ca_count; i++) {
